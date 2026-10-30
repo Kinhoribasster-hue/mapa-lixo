@@ -41,30 +41,39 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-// Centro de reserva caso o GPS não seja liberado (troque pela sua cidade)
+// ===== Configuração =====
+const SUPABASE_URL = "https://ppgvsrltpajkzadwpnya.supabase.co";
+const SUPABASE_KEY = "sb_publishable_751Q43FE8rKJs9mtSFSiVQ_pNa1G6NZ";
+// Centro de reserva caso o GPS não seja liberado
 const CENTRO_RESERVA = [-8.0476, -34.8770];
-const CHAVE = "mapa-lixo-pontos-v1";
 
+const chaveOk = SUPABASE_KEY && SUPABASE_KEY.indexOf("COLE") !== 0;
+const sb = chaveOk ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+
+function status(t) { document.getElementById("status").textContent = t; }
+
+// ===== Mapa =====
 const mapa = L.map("map").setView(CENTRO_RESERVA, 14);
-// Para testes: mapa Esri (sem chave). Depois trocamos por MapTiler ou OpenStreetMap hospedado.
+
 const mapaEsri = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", {
   maxZoom: 19,
   attribution: "Tiles &copy; Esri"
 }).addTo(mapa);
 
-// Só funciona quando o arquivo está hospedado (site ou localhost), não aberto da pasta
 const mapaOSM = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
   attribution: "&copy; OpenStreetMap"
 });
 
-L.control.layers({ "Esri (teste)": mapaEsri, "OpenStreetMap (hospedado)": mapaOSM }, null, { position: "topright" }).addTo(mapa);
+L.control.layers({ "Esri": mapaEsri, "OpenStreetMap": mapaOSM }, null, { position: "topright" }).addTo(mapa);
 
 const calor = L.heatLayer([], { radius: 28, blur: 22, maxZoom: 17 }).addTo(mapa);
 const marcadores = L.layerGroup();
 let mostrandoCalor = true;
-let ultimaData = null;
+let ultimoId = null;
+let pontos = [];
 
 function mostrarMarcadores() {
   mostrandoCalor = false;
@@ -72,100 +81,150 @@ function mostrarMarcadores() {
   mapa.addLayer(marcadores);
 }
 
-let pontos = [];
-try { pontos = JSON.parse(localStorage.getItem(CHAVE) || "[]"); } catch (e) {}
-
-function salvar() {
-  try { localStorage.setItem(CHAVE, JSON.stringify(pontos)); }
-  catch (e) { /* fotos grandes podem estourar o limite no teste */ }
+function criarPopup(p) {
+  const div = document.createElement("div");
+  div.className = "popup";
+  if (p.foto_url) {
+    const img = document.createElement("img");
+    img.src = p.foto_url;
+    img.alt = "Foto do lixo";
+    div.appendChild(img);
+  }
+  const pequeno = document.createElement("small");
+  pequeno.textContent = new Date(p.created_at).toLocaleString("pt-BR");
+  div.appendChild(pequeno);
+  return div;
 }
 
 function desenhar() {
   calor.setLatLngs(pontos.map(p => [p.lat, p.lng, 1]));
   marcadores.clearLayers();
   pontos.forEach(p => {
-    const html = '<div class="popup">' +
-      (p.foto ? '<img src="' + p.foto + '">' : '<b>Ponto de teste (sem foto)</b><br>') +
-      '<small>' + new Date(p.data).toLocaleString("pt-BR") + '</small></div>';
-    const m = L.marker([p.lat, p.lng]).bindPopup(html).addTo(marcadores);
-    if (p.data === ultimaData) m.openPopup();
+    const m = L.marker([p.lat, p.lng]).bindPopup(criarPopup(p)).addTo(marcadores);
+    if (p.id === ultimoId && mapa.hasLayer(marcadores)) m.openPopup();
   });
   status(pontos.length + " ponto(s) no mapa");
 }
 
-function status(t) { document.getElementById("status").textContent = t; }
+// ===== Banco de dados =====
+async function buscar() {
+  const resp = await sb.from("denuncias")
+    .select("id, created_at, lat, lng, foto_url")
+    .order("created_at", { ascending: false })
+    .limit(1000);
+  if (resp.error) throw new Error("carregar pontos: " + resp.error.message);
+  pontos = resp.data || [];
+}
 
-// Reduz a foto para ~800px para não pesar
-function reduzir(arquivo) {
-  return new Promise(resolve => {
-    const img = new Image();
-    img.onload = () => {
-      const max = 800, esc = Math.min(1, max / Math.max(img.width, img.height));
-      const c = document.createElement("canvas");
-      c.width = img.width * esc; c.height = img.height * esc;
-      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-      resolve(c.toDataURL("image/jpeg", 0.6));
+async function carregar() {
+  if (!sb) { status("Falta colocar a chave do Supabase no arquivo."); return; }
+  try {
+    await buscar();
+    desenhar();
+  } catch (err) {
+    status("Erro: " + err.message);
+  }
+}
+
+// ===== Foto =====
+function carregarImagem(arquivo) {
+  return new Promise((resolve, reject) => {
+    const leitor = new FileReader();
+    const limite = setTimeout(() => reject(new Error("tempo esgotado ao ler a foto")), 20000);
+    leitor.onerror = () => { clearTimeout(limite); reject(new Error("falha ao ler o arquivo")); };
+    leitor.onload = () => {
+      const img = new Image();
+      img.onload = () => { clearTimeout(limite); resolve(img); };
+      img.onerror = () => { clearTimeout(limite); reject(new Error("formato de foto não suportado")); };
+      img.src = leitor.result;
     };
-    img.src = URL.createObjectURL(arquivo);
+    leitor.readAsDataURL(arquivo);
   });
 }
 
+// Reduz a foto para ~800px e devolve um arquivo JPEG leve
+async function reduzir(arquivo) {
+  const max = 800;
+  let fonte;
+  try {
+    fonte = await createImageBitmap(arquivo, { imageOrientation: "from-image" });
+  } catch (e) {
+    fonte = await carregarImagem(arquivo);
+  }
+  const esc = Math.min(1, max / Math.max(fonte.width, fonte.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(fonte.width * esc);
+  c.height = Math.round(fonte.height * esc);
+  c.getContext("2d").drawImage(fonte, 0, 0, c.width, c.height);
+  return new Promise((resolve, reject) => {
+    c.toBlob(b => b ? resolve(b) : reject(new Error("não consegui comprimir a foto")), "image/jpeg", 0.7);
+  });
+}
+
+function pegarPosicao() {
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(
+      resolve,
+      err => reject(new Error("GPS: " + err.message + ". Libere a localização para este site.")),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+    );
+  });
+}
+
+// ===== Envio de uma denúncia =====
 document.getElementById("arquivo").addEventListener("change", async e => {
   const arq = e.target.files[0];
   if (!arq) return;
-  status("Pegando sua localização...");
-  navigator.geolocation.getCurrentPosition(async pos => {
-    const foto = await reduzir(arq);
-    const agora = Date.now();
-    pontos.push({
-      lat: pos.coords.latitude, lng: pos.coords.longitude,
-      data: agora, foto
-    });
-    ultimaData = agora;
-    salvar();
+  if (!sb) { status("Falta colocar a chave do Supabase no arquivo."); return; }
+  try {
+    status("1/4 Lendo a foto...");
+    const blob = await reduzir(arq);
+    e.target.value = "";
+
+    status("2/4 Pegando sua localização...");
+    const pos = await pegarPosicao();
+
+    status("3/4 Enviando a foto...");
+    const nome = Date.now() + "-" + Math.random().toString(36).slice(2, 8) + ".jpg";
+    const envio = await sb.storage.from("fotos").upload(nome, blob, { contentType: "image/jpeg" });
+    if (envio.error) throw new Error("envio da foto: " + envio.error.message);
+    const url = sb.storage.from("fotos").getPublicUrl(nome).data.publicUrl;
+
+    status("4/4 Salvando a denúncia...");
+    const ins = await sb.from("denuncias")
+      .insert({ lat: pos.coords.latitude, lng: pos.coords.longitude, foto_url: url })
+      .select("id")
+      .single();
+    if (ins.error) throw new Error("salvar denúncia: " + ins.error.message);
+    ultimoId = ins.data.id;
+
+    await buscar();
     mostrarMarcadores();
     mapa.setView([pos.coords.latitude, pos.coords.longitude], 17);
     desenhar();
-  }, () => status("Não consegui o GPS. Libere a localização no navegador."),
-  { enableHighAccuracy: true, timeout: 15000 });
-  e.target.value = "";
+    status("Pronto! Denúncia enviada. " + pontos.length + " ponto(s) no mapa");
+  } catch (err) {
+    e.target.value = "";
+    status("Erro: " + err.message);
+  }
 });
 
+// ===== Botão calor / marcadores =====
 document.getElementById("btnAlternar").addEventListener("click", () => {
   mostrandoCalor = !mostrandoCalor;
   if (mostrandoCalor) { mapa.addLayer(calor); mapa.removeLayer(marcadores); }
   else { mapa.removeLayer(calor); mapa.addLayer(marcadores); }
 });
 
-// Centraliza onde você estiver; se negar, usa o centro de reserva
-navigator.geolocation.getCurrentPosition(pos => {
-  const c = [pos.coords.latitude, pos.coords.longitude];
-  mapa.setView(c, 15);
-  // Pontos de teste só se o mapa estiver vazio, espalhados perto de você
-  if (pontos.length === 0) {
-    for (let i = 0; i < 25; i++) {
-      pontos.push({
-        lat: c[0] + (Math.random() - 0.5) * 0.01,
-        lng: c[1] + (Math.random() - 0.5) * 0.01,
-        data: Date.now(), foto: null, teste: true
-      });
-    }
-    desenhar();
-  }
-}, () => {
-  if (pontos.length === 0) {
-    for (let i = 0; i < 25; i++) {
-      pontos.push({
-        lat: CENTRO_RESERVA[0] + (Math.random() - 0.5) * 0.01,
-        lng: CENTRO_RESERVA[1] + (Math.random() - 0.5) * 0.01,
-        data: Date.now(), foto: null, teste: true
-      });
-    }
-  }
-  desenhar();
-});
-
-desenhar();
+// ===== Início =====
+if (navigator.geolocation) {
+  navigator.geolocation.getCurrentPosition(
+    pos => mapa.setView([pos.coords.latitude, pos.coords.longitude], 15),
+    () => {},
+    { timeout: 10000, maximumAge: 60000 }
+  );
+}
+carregar();
 </script>
 </body>
 </html>
