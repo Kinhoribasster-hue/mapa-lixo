@@ -75,10 +75,16 @@ let mostrandoCalor = true;
 let ultimoId = null;
 let pontos = [];
 
+// O mapa de calor fica sempre no mapa. Para "esconder", ele recebe uma lista vazia.
+// (Remover e redesenhar essa camada causava o erro "null is not an object".)
+function dadosDoCalor() {
+  return mostrandoCalor ? pontos.map(p => [p.lat, p.lng, 1]) : [];
+}
+
 function mostrarMarcadores() {
   mostrandoCalor = false;
-  mapa.removeLayer(calor);
-  mapa.addLayer(marcadores);
+  if (!mapa.hasLayer(marcadores)) mapa.addLayer(marcadores);
+  calor.setLatLngs([]);
 }
 
 function criarPopup(p) {
@@ -97,12 +103,12 @@ function criarPopup(p) {
 }
 
 function desenhar() {
-  calor.setLatLngs(pontos.map(p => [p.lat, p.lng, 1]));
   marcadores.clearLayers();
   pontos.forEach(p => {
     const m = L.marker([p.lat, p.lng]).bindPopup(criarPopup(p)).addTo(marcadores);
-    if (p.id === ultimoId && mapa.hasLayer(marcadores)) m.openPopup();
+    if (p.id === ultimoId && !mostrandoCalor && mapa.hasLayer(marcadores)) m.openPopup();
   });
+  calor.setLatLngs(dadosDoCalor());
   status(pontos.length + " ponto(s) no mapa");
 }
 
@@ -200,7 +206,7 @@ document.getElementById("arquivo").addEventListener("change", async e => {
 
     await buscar();
     mostrarMarcadores();
-    mapa.setView([pos.coords.latitude, pos.coords.longitude], 17);
+    mapa.setView([pos.coords.latitude, pos.coords.longitude], 17, { animate: false });
     desenhar();
     status("Pronto! Denúncia enviada. " + pontos.length + " ponto(s) no mapa");
   } catch (err) {
@@ -212,8 +218,9 @@ document.getElementById("arquivo").addEventListener("change", async e => {
 // ===== Botão calor / marcadores =====
 document.getElementById("btnAlternar").addEventListener("click", () => {
   mostrandoCalor = !mostrandoCalor;
-  if (mostrandoCalor) { mapa.addLayer(calor); mapa.removeLayer(marcadores); }
-  else { mapa.removeLayer(calor); mapa.addLayer(marcadores); }
+  if (mostrandoCalor) mapa.removeLayer(marcadores);
+  else mapa.addLayer(marcadores);
+  calor.setLatLngs(dadosDoCalor());
 });
 
 // ===== Início =====
